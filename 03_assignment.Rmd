@@ -27,6 +27,7 @@ library(dbplyr)            # for SQL query "cheating" - part of tidyverse but ne
 library(mdsr)              # for accessing some databases - goes with Modern Data Science with R textbook
 library(RMySQL)            # for accessing MySQL databases
 library(RSQLite)           # for accessing SQLite databases
+library(lime)
 
 #mapping
 library(maps)              # for built-in maps
@@ -51,33 +52,389 @@ From now on, GitHub should be part of your routine when doing assignments. I rec
 
 **Task**: When you are finished with the assignment, post a link below to the GitHub repo for the assignment. If you want to post it to your personal website, that's ok (not required). Make sure the link goes to a spot in the repo where I can easily find this assignment. For example, if you have a website with a blog and post the assignment as a blog post, link to the post's folder in the repo. As an example, I've linked to my GitHub stacking material [here](https://github.com/llendway/ads_website/tree/master/_posts/2021-03-22-stacking).
 
-[Link to my assignment on Github]()
+[Link to my assignment on Github](https://github.com/neelloc28/Advanced-DataSci-hw3)
 
 
 ## Local Interpretable Machine Learning
 
 You are going to use the King County house data and the same random forest model to predict `log_price` that I used in the [tutorial](https://advanced-ds-in-r.netlify.app/posts/2021-03-31-imllocal/).
 
+```{r}
+data("house_prices")
+
+#create log_price and drop price variable
+house_prices <- house_prices %>%
+  mutate(log_price = log(price, base = 10)) %>%
+  #make all integers numeric (fixes prediction problem)
+  mutate(across(where(is.integer), as.numeric)) %>%
+  select(-price)
+  
+```
+
+```{r}
+set.seed(327)
+
+#randomly assign 75% of data to training
+house_split <- initial_split(house_prices, prop = .75)
+
+house_training <- training(house_split)
+house_testing <- testing(house_split)
+```
+
+Random Forest Model
+
+```{r}
+# set up recipe and transformation steps and roles
+ranger_recipe <- 
+  recipe(formula = log_price ~ ., 
+         data = house_training) %>% 
+  step_date(date, 
+            features = "month") %>% 
+  # Make these evaluative variables, not included in modeling
+  update_role(all_of(c("id",
+                       "date")),
+              new_role = "evaluative")
+
+#define model
+ranger_spec <- 
+  rand_forest(mtry = 6, 
+              min_n = 10, 
+              trees = 200) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger")
+
+#create workflow
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+
+#fit the model
+set.seed(712) # for reproducibility - random sampling in random forest choosing number of variables
+ranger_fit <- ranger_workflow %>% 
+  fit(house_training)
+```
+
+
 **Tasks:**
 
 1. Choose 3 new observations and do the following for each observation:  
-  - Construct a break-down plot using the default ordering. Interpret the resulting graph. Which variables contribute most to each observation's prediction?  
+  - Construct a break-down plot using the default ordering. Interpret the resulting graph. Which variables contribute most to each observation's prediction?
   - Construct a SHAP graph and interpret it. Does it tell a similar story to the break-down plot?  
-  - Construct a LIME graph (follow my code carefully). How close is each original prediction to the prediction from the local model? Interpret the result. You can also try using fewer or more variables in the local model than I used in the example.  
-  
+  - Construct a LIME graph (follow my code carefully). How close is each original prediction to the prediction from the local model? Interpret the result. You can also try using fewer or more variables in the local model than I used in the example. 
+
+```{r}
+# Create an explainer for the random forest model:
+rf_explain <- 
+  explain_tidymodels(
+    model = ranger_fit,
+    data = house_training %>% select(-log_price), 
+    y = house_training %>%  pull(log_price),
+    label = "rf"
+  )
+```
+
+Observation 1
+```{r}
+# Choose an observation
+obs28 <- house_testing %>% slice(28) 
+
+# Price of obs28's house - just to know because I can't think in logs
+10^(obs28$log_price)
+```
+
+```{r}
+# Pulls together the data needed for the break-down plot
+pp_forest1 <- predict_parts(explainer = rf_explain,
+                          new_observation = obs28,
+                          type = "break_down") #default
+
+# Break-down plot
+plot(pp_forest1)
+
+# Table form of break-down plot data
+pp_forest1
+```
+
+**Interpretation: The bars start at 5.666, which is the average predicted log price when the random forest model is applied to the training data. The other bars can be interpreted as the change in the average predicted log price with those variables at those fixed values.  For example, with floors = 2, the average predicted log price goes down by 0.004.  For observation 28, the variables that contribute the most to the model's prediction are lat, grade, and sqft_living.**
+
+SHAP
+```{r, cache=TRUE}
+rf_shap <-predict_parts(explainer = rf_explain,
+                        new_observation = obs28,
+                        type = "shap",
+                        B = 10 #number of reorderings - start small
+)
+
+plot(rf_shap)
+```
+
+**Interpretation: Each bar is the average contribution of each variable's value towards the predicted log price.  The length of the bars represent the variation across different orderings of variable consideration in the random forest model.  In this case, lat = 47.52 contributes around -0.075.  This is similar to the break-down plot because it shows the same three variables as contributing the most, and condition = 4 is still the only variable whose contribution raises the log price.**
+
+LIME
+```{r}
+set.seed(2)
+
+# NEED these two lines of code always!
+# They make sure our explainer is defined correctly to use in the next step
+model_type.dalex_explainer <- DALEXtra::model_type.dalex_explainer
+predict_model.dalex_explainer <- DALEXtra::predict_model.dalex_explainer
+
+lime_rf <- predict_surrogate(explainer = rf_explain,
+                             new_observation = obs28 %>%
+                               select(-log_price), 
+                             n_features = 5,
+                             n_permutations = 1000,
+                             type = "lime")
+
+lime_rf %>% 
+  select(model_r2, model_prediction, prediction) %>% 
+  distinct()
+
+#model_r2 is overall model performance (akin to R^2)
+#prediction is prediction from original model
+#model_prediction is prediction from the local model
+
+plot(lime_rf) +
+  labs(x = "Variable")
+```
+**In this case, the original prediction is 5.62123-5.478635= 0.142595 lower than the prediction from the local model. If the floors are less than or equal to 2 and greater than 1.5, the model coefficient will be as it is shown on the LIME plot. The predicted log house price from the original random forest is about 5.48, while the predicted log house price from the local model is about 5.62.  The overall fit/performance of the local model was around 0.066, which doesn't seem like a very good value.**
+
+Observation 2
+```{r}
+# Choose an observation
+obs1999 <- house_testing %>% slice(1999) 
+
+# Price of obs28's house - just to know because I can't think in logs
+10^(obs1999$log_price)
+```
+
+```{r}
+# Pulls together the data needed for the break-down plot
+pp_forest2 <- predict_parts(explainer = rf_explain,
+                          new_observation = obs1999,
+                          type = "break_down") #default
+
+# Break-down plot
+plot(pp_forest2)
+
+# Table form of break-down plot data
+pp_forest2
+```
+**Interpretation: The bars start at 5.666, which is the average predicted log price when the random forest model is applied to the training data. The other bars can be interpreted as the change in the average predicted log price with those variables at those fixed values.  For example, with sqft_living = 1390, the average predicted log price goes down by 0.049.  For observation 1999, the variables that contribute the most to the model's prediction are also lat, grade, and sqft_living.**
+
+SHAP
+```{r, cache=TRUE}
+rf_shap2 <-predict_parts(explainer = rf_explain,
+                        new_observation = obs1999,
+                        type = "shap",
+                        B = 10 #number of reorderings - start small
+)
+
+plot(rf_shap2)
+```
+
+**Interpretation: Each bar is the average contribution of each variable's value towards the predicted log price.  The length of the bars represent the variation across different orderings of variable consideration in the random forest model.  In this case, lat = 47.53 contributes around -0.03.  This plot is similar to the break-down plot because it shows the same three variables as contributing the most, and there are still only three variable whose contribution raises the log price.**
+
+LIME
+```{r}
+set.seed(2)
+
+# NEED these two lines of code always!
+# They make sure our explainer is defined correctly to use in the next step
+model_type.dalex_explainer <- DALEXtra::model_type.dalex_explainer
+predict_model.dalex_explainer <- DALEXtra::predict_model.dalex_explainer
+
+lime_rf2 <- predict_surrogate(explainer = rf_explain,
+                             new_observation = obs1999 %>%
+                               select(-log_price), 
+                             n_features = 6,
+                             n_permutations = 1000,
+                             type = "lime")
+
+lime_rf2 %>% 
+  select(model_r2, model_prediction, prediction) %>% 
+  distinct()
+
+#model_r2 is overall model performance (akin to R^2)
+#prediction is prediction from original model
+#model_prediction is prediction from the local model
+
+plot(lime_rf2) +
+  labs(x = "Variable")
+```
+**In this case, the original prediction is 5.546033-5.501569= 0.044464 lower than the prediction from the local model (seems pretty close). If the floors are less than or equal to 1.5, the model coefficient will be as it is shown on the LIME plot. The predicted log house price from the original random forest is about 5.5, while the predicted log house price from the local model is about 5.55. The explanation fit is 0.073, which still doesn't seem very good.**
+
+Observation 3
+```{r}
+# Choose an observation
+obs13 <- house_testing %>% slice(13) 
+
+# Price of obs28's house - just to know because I can't think in logs
+10^(obs13$log_price)
+```
+
+```{r}
+# Pulls together the data needed for the break-down plot
+pp_forest3 <- predict_parts(explainer = rf_explain,
+                          new_observation = obs13,
+                          type = "break_down") #default
+
+# Break-down plot
+plot(pp_forest3)
+
+# Table form of break-down plot data
+pp_forest3
+```
+
+**Interpretation: The bars start at 5.666, which is the average predicted log price when the random forest model is applied to the training data. The other bars can be interpreted as the change in the average predicted log price with those variables at those fixed values.  For example, with floors = 2, the average predicted log price goes down by 0.004.  For observation 13, the variables that contribute the most to the model's prediction are lat, sqft_living, and sqft_living15.**
+
+SHAP
+```{r, cache=TRUE}
+rf_shap3 <-predict_parts(explainer = rf_explain,
+                        new_observation = obs13,
+                        type = "shap",
+                        B = 10 #number of reorderings - start small
+)
+
+plot(rf_shap3)
+```
+
+**Interpretation: Each bar is the average contribution of each variable's value towards the predicted log price.  The length of the bars represent the variation across different orderings of variable consideration in the random forest model.  In this case, lat = 47.43 contributes around -0.13.  This plot is similar to the break-down plot because it shows the same three variables as contributing the most, and there are still only three variable whose contribution raises the log price.**
+
+LIME
+```{r}
+set.seed(2)
+
+# NEED these two lines of code always!
+# They make sure our explainer is defined correctly to use in the next step
+model_type.dalex_explainer <- DALEXtra::model_type.dalex_explainer
+predict_model.dalex_explainer <- DALEXtra::predict_model.dalex_explainer
+
+lime_rf3 <- predict_surrogate(explainer = rf_explain,
+                             new_observation = obs13 %>%
+                               select(-log_price), 
+                             n_features = 4,
+                             n_permutations = 1000,
+                             type = "lime")
+
+lime_rf3 %>% 
+  select(model_r2, model_prediction, prediction) %>% 
+  distinct()
+
+#model_r2 is overall model performance (akin to R^2)
+#prediction is prediction from original model
+#model_prediction is prediction from the local model
+
+plot(lime_rf3) +
+  labs(x = "Variable")
+```
+**In this case, the original prediction is 5.392-5.344956= 0.047044 lower than the prediction from the local model (very close). If the latitude is less than or equal to 47.5, the model coefficient will be as it is shown on the LIME plot. The predicted log house price from the original random forest is about 5.34, while the predicted log house price from the local model is about 5.39. In this case, the explanation fit is a lot higher than for the previous two observations, with a value of 0.49.**
+
 2. Describe how you would use the interpretable machine learning tools we've learned (both local and global) in future machine learning projects? How does each of them help you?
+
+**Global model interpretations help us to see how changing the value of one variable may impact the model's prediction.  Local model interpretations help us to see how much (or how little) specific variables contribute to the prediction of one observation.**
+
+**If I wanted to see how changing one specific variable would shift the model's prediction (and potentially accuracy??), I would use global model interpretation tools.  For example, does changing someone's race affect the ability of the model to perform well (as it did in the Coded Bias documentary) or drastically alter its prediction?**
+
+**If I wanted to see how the model handled specific observations (for example, ones that may not share many values with other observations in the data set), I could use local model interpretation to see if the model does a worse job prediction-wise with outlier observations.**
 
 ## SQL
 
 You will use the `airlines` data from the SQL database that I used in the example in the [tutorial](https://advanced-ds-in-r.netlify.app/posts/2021-03-29-sqlinr/). Be sure to include the chunk to connect to the database here. And, when you are finished, disconnect. You may need to reconnect throughout as it times out after a while.
 
+```{r}
+#connecting to the airlines database
+con_air <- dbConnect_scidb("airlines")
+```
+
 **Tasks**:
 
-1. Create a SQL chunk and an equivalent R code chunk that does the following: for each airport (with its name, not code), year, and month find the total number of departing flights, the distinct destinations to which they flew, the average length of the flight, the average distance of the flight, and the proportion of flights that arrived more than 20 minutes late. In the R code chunk, write this out to a dataset. (HINT: 1. start small! 2. you may want to do the R part first and use it to "cheat" into the SQL code).  
-  - With the dataset you wrote out, create a graph that helps illustrate the "worst" airports in terms of late arrivals. You have some freedom in how you define worst and you may want to consider some of the other variables you computed. Do some theming to make your graph look glamorous (those of you who weren't in my intro data science class this year may want to watch Will Chase's [Glamour of Graphics](https://www.youtube.com/watch?v=h5cTacaWE6I) talk for inspiration).  
-  - Although your graph was truly inspirational, you've been requested to "boil it down to a few numbers." Some people just don't appreciate all that effort you put in. And, you need to use the already summarized data that you already pulled in from SQL. Create a table with 6 or fewer rows and 3 or fewer columns that summarizes which airport is the "worst" in terms of late arrivals. Be careful with your calculations. You may consider using the `kable`, `kableExtra`, or `gt` packages to make your table look truly spectacular.
+1. Create a SQL chunk and an equivalent R code chunk that does the following: for each airport (with its name, not code), year, and month find the total number of departing flights, the distinct destinations to which they flew, the average length of the flight, the average distance of the flight, and the proportion of flights that arrived more than 20 minutes late. In the R code chunk, write this out to a dataset. (HINT: 1. start small! 2. you may want to do the R part first and use it to "cheat" into the SQL code).
+
+R chunk
+```{r}
+each_airport <- tbl(con_air,"flights") %>%
+  head(2000) %>%
+  select(year, month, origin, dest, air_time, distance, arr_delay) %>%
+  group_by(origin, month) %>%
+  summarize(num_depart = n(),
+            avg_flight_dist = mean(distance),
+            prop_late = mean(arr_delay > 20)) %>%
+  left_join(tbl(con_air,"airports"), by = c("origin" = "faa"))
   
-2. Come up with your own interesting question that data in the airlines database can help you answer. Write a SQL query and equivalent R code chunk to extract the data you need and create an elegant graph to help answer the question. Be sure to write down the question so it is clear. 
+
+each_airport
+# for each airport (with its name, not code) and month find the total number of departing flights, the average distance of the flight, and the proportion of flights that arrived more than 20 minutes late.
+
+tbl(con_air,"airports") %>%
+  head(2000)
+```
+
+SQL Chunk
+```{sql connection = con_air}
+SELECT 
+  origin, month,
+  COUNT(origin) AS num_depart,
+  AVG(distance) AS avg_flight_dist,
+  AVG(arr_delay > 20) AS prop_late_over20
+FROM (SELECT * FROM flights LIMIT 2000) `fl`
+GROUP BY carrier, month
+```
+
+  - With the dataset you wrote out, create a graph that helps illustrate the "worst" airports in terms of late arrivals. You have some freedom in how you define worst and you may want to consider some of the other variables you computed. Do some theming to make your graph look glamorous (those of you who weren't in my intro data science class this year may want to watch Will Chase's [Glamour of Graphics](https://www.youtube.com/watch?v=h5cTacaWE6I) talk for inspiration).
+```{r, warning = FALSE}
+each_airport <- each_airport %>%
+  mutate(arrival_rank = ifelse(prop_late == 0, "good", ifelse(prop_late < 0.05, "medium", "bad"))) %>%
+  filter(country == "United States")
+
+#0% of arrivals are late: "good"
+#less than 5% of arrivals are late: "medium"
+#5% or more arrivals are late: "bad"
+
+each_airport
+states <- map_data("state")
+
+ggplot() + 
+  geom_polygon( data=states, aes(x=long, y=lat, group=group),
+                color="black", fill="white" ) +
+  geom_point(data = each_airport, aes(x=lon, y=lat, color = arrival_rank, size = num_depart)) +
+  ggtitle("Airports Ranked by Percentage of Late Arrivals") +
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        panel.background=element_rect(fill = "lightblue"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background=element_blank(),
+        legend.title = element_blank()) +
+  scale_fill_discrete(name = "nothing",
+                      breaks=c("bad", "good","medium"),
+                      labels = c("0%", "less than 5%","5% or more"))
+  
+```
+  
+  - Although your graph was truly inspirational, you've been requested to "boil it down to a few numbers." Some people just don't appreciate all that effort you put in. And, you need to use the already summarized data that you already pulled in from SQL. Create a table with 6 or fewer rows and 3 or fewer columns that summarizes which airport is the "worst" in terms of late arrivals. Be careful with your calculations. You may consider using the `kable`, `kableExtra`, or `gt` packages to make your table look truly spectacular.
+
+```{r}
+each_airport_small <- each_airport %>%
+  arrange(desc(num_depart)) %>%
+  head(6) %>% #only six busiest airports
+  select(name, num_depart, prop_late,-origin) #how do i get origin out?
+
+#because the airports with very high proportions of delayed departures only really had a handful of departures in a given month (the proportion late may be .33, but there were only three departures so that meant that only one was late), I chose to display the 6 busiest airports in the table (based on number of departures).
+each_airport_small
+```
+
+  
+2. Come up with your own interesting question that data in the airlines database can help you answer. Write a SQL query and equivalent R code chunk to extract the data you need and create an elegant graph to help answer the question. Be sure to write down the question so it is clear.
+
+```{r}
+dbListTables(con_air)
+```
 
 
 ## Function Friday

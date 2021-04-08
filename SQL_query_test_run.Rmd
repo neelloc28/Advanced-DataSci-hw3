@@ -1,0 +1,106 @@
+---
+title: "test"
+author: "Colleen Minnihan"
+date: "4/7/2021"
+output: html_document
+---
+```{r libraries, message=FALSE}
+# SEE modeldata package for new datasets
+library(tidyverse)         # for graphing and data cleaning
+library(tidymodels)        # for modeling
+library(stacks)            # for stacking models
+library(naniar)            # for examining missing values (NAs)
+library(lubridate)         # for date manipulation
+library(moderndive)        # for King County housing data
+library(DALEX)             # for model interpretation  
+library(DALEXtra)          # for extension of DALEX
+library(patchwork)         # for combining plots nicely
+library(dbplyr)            # for SQL query "cheating" - part of tidyverse but needs to be loaded separately
+library(mdsr)              # for accessing some databases - goes with Modern Data Science with R textbook
+library(RMySQL)            # for accessing MySQL databases
+library(RSQLite)           # for accessing SQLite databases
+
+#mapping
+library(maps)              # for built-in maps
+library(sf)                # for making maps using geom_sf
+library(ggthemes)          # Lisa added - I like theme_map() for maps :)
+
+#tidytext
+library(tidytext)          # for text analysis, the tidy way!
+library(textdata)          
+library(reshape2)
+library(wordcloud)         # for wordcloud
+library(stopwords)
+
+theme_set(theme_minimal()) # Lisa's favorite theme
+```
+
+
+## SQL
+
+You will use the `airlines` data from the SQL database that I used in the example in the [tutorial](https://advanced-ds-in-r.netlify.app/posts/2021-03-29-sqlinr/). Be sure to include the chunk to connect to the database here. And, when you are finished, disconnect. You may need to reconnect throughout as it times out after a while.
+
+```{r}
+#connecting to the airlines database
+con_air <- dbConnect_scidb("airlines")
+```
+
+SQL code chunk! To see variable names
+```{sql connection=con_air}
+DESCRIBE flights;
+```
+
+
+
+**Tasks**:
+
+1. Create a SQL chunk and an equivalent R code chunk that does the following: for each airport (with its name, not code), year, and month find the total number of departing flights, the distinct destinations to which they flew, the average length of the flight, the average distance of the flight, and the proportion of flights that arrived more than 20 minutes late. In the R code chunk, write this out to a dataset. (HINT: 1. start small! 2. you may want to do the R part first and use it to "cheat" into the SQL code).
+
+SQL chunk
+```{sql connection=con_air}
+
+SELECT * 
+FROM flights 
+LIMIT 20
+```
+
+
+for each airport (with its name, not code), year, and month find the total number of departing flights, the distinct destinations to which they flew, the average length of the flight, the average distance of the flight, and the proportion of flights that arrived more than 20 minutes late. In the R code chunk, write this out to a dataset. (HINT: 1. start small! 2. you may want to do the R part first and use it to "cheat" into the SQL code).
+
+R chunk
+```{r}
+dbListTables(con_air)
+
+flights <- 
+  tbl(con_air,
+      sql("
+          SELECT * 
+          FROM flights 
+          LIMIT 2000
+          ")
+      )
+
+flights <- flights %>%
+  select(year, month, origin, dest, air_time, distance, arr_delay)
+
+each_airport <- flights %>%
+  group_by(origin, month) %>%
+  summarize(num_depart = count(origin),
+            avg_flight_dist = mean(distance),
+            prop_late = (arr_delay > 20)/(arr_delay))
+
+each_airport
+# for each airport (with its name, not code) and month find the total number of departing flights, the average distance of the flight, and the proportion of flights that arrived more than 20 minutes late.
+```
+
+SQL Chunk
+```{sql connection = con_air}
+SELECT 
+  origin, month,
+  COUNT(origin) AS num_depart,
+  AVG(distance) AS avg_flight_dist,
+  AVG(arr_delay > 20) AS prop_late_over20
+FROM (SELECT * FROM flights LIMIT 2000) `fl`
+GROUP BY carrier, month
+```
+
