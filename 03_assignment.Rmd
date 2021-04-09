@@ -357,7 +357,7 @@ con_air <- dbConnect_scidb("airlines")
 R chunk
 ```{r}
 each_airport <- tbl(con_air,"flights") %>%
-  head(2000) %>%
+  head(100000) %>%
   select(year, month, origin, dest, air_time, distance, arr_delay) %>%
   group_by(origin, month) %>%
   summarize(num_depart = n(),
@@ -368,12 +368,6 @@ each_airport <- tbl(con_air,"flights") %>%
 
 each_airport
 # for each airport (with its name, not code) and month find the total number of departing flights, the average distance of the flight, and the proportion of flights that arrived more than 20 minutes late.
-
-tbl(con_air,"airports") %>%
-  head(2000)
-
-tbl(con_air,"flights") %>%
-  head(2000)
 ```
 
 SQL Chunk
@@ -394,7 +388,7 @@ FROM (SELECT
   COUNT(origin) AS num_depart,
   AVG(distance) AS avg_flight_dist,
   AVG(arr_delay > 20) AS prop_late_over20
-FROM (SELECT * FROM flights LIMIT 1000) fl
+FROM (SELECT * FROM flights LIMIT 100000) fl
 GROUP BY origin, month) smry
 INNER JOIN airports AS a 
   ON (smry.origin = a.faa)
@@ -474,40 +468,39 @@ to_msp <- tbl(con_air,"flights") %>%
 to_msp
 ```
 
-SQL Chunk
+
+
 ```{sql connection=con_air}
-SELECT
-  
+SELECT 
+`city`, 
+`lat`, 
+`lon`, 
+COUNT(*) AS `count_city`
+FROM (SELECT `year`, `month`, `day`, `dep_time`, `sched_dep_time`, `dep_delay`, `arr_time`, `sched_arr_time`, `arr_delay`, `carrier`, `tailnum`, `flight`, `origin`, `dest`, `air_time`, `distance`, `cancelled`, `diverted`, `hour`, `minute`, `time_hour`, `name`, `lat`, `lon`, `alt`, `tz`, `dst`, `city`, `country`
+FROM (SELECT *
+FROM `flights`
+LIMIT 100000) `LHS`
+LEFT JOIN `airports` AS `RHS`
+ON (`LHS`.`origin` = `RHS`.`faa`)
+) `q01`
+WHERE (`dest` = 'MSP')
+GROUP BY `city`, `lat`, `lon`
+ORDER BY `count_city` DESC
 ```
 
 
 
 ```{r}
-ggplot() + 
-  geom_polygon( data=states, aes(x=long, y=lat, group=group),
-                color="black", fill="white" ) +
-  geom_point(data = to_msp, aes(x=lon, y=lat, color=count_city)) +
-  ggtitle("Number of Trips to MSP (Nov. 2010)") +
-  theme(axis.line=element_blank(),
-        axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        axis.title.x=element_blank(),
-        axis.title.y=element_blank(),
-        panel.background=element_rect(fill = "lightblue"),
-        panel.grid.major=element_blank(),
-        panel.grid.minor = element_blank(),
-        plot.background=element_blank()) +
-  labs(legend.title = "hi")
-
 collect(to_msp) %>%
   st_as_sf(coords = c("lon","lat"), crs = 4326) %>%
   st_crop(xmin = -125, xmax = -50, ymin = 24, ymax = 50) %>%
 ggplot() + 
   geom_sf(data=states,
           color="azure4", fill="white") +
-  geom_sf(aes(size = count_city, alpha = 0.7), color = "blue") +
-  ggtitle("Number of Trips to MSP (Nov. 2010)")
+  geom_sf(aes(size = count_city), color = "blue", alpha = 0.7) +
+  ggtitle("Number of Trips to MSP (Nov. 2010)") +
+  labs(size = "Number of Departures") +
+  coord_sf(crs = st_crs(5070))
 ```
 
 
