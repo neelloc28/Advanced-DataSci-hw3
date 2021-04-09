@@ -28,6 +28,8 @@ library(mdsr)              # for accessing some databases - goes with Modern Dat
 library(RMySQL)            # for accessing MySQL databases
 library(RSQLite)           # for accessing SQLite databases
 library(lime)
+library(knitr)
+library(kableExtra)
 
 #mapping
 library(maps)              # for built-in maps
@@ -369,18 +371,36 @@ each_airport
 
 tbl(con_air,"airports") %>%
   head(2000)
+
+tbl(con_air,"flights") %>%
+  head(2000)
 ```
 
 SQL Chunk
-```{sql connection = con_air}
+
+# for each airport (with its name, not code) and month find the total number of departing flights, the average distance of the flight, and the proportion of flights that arrived more than 20 minutes late.
+
+```{sql connection=con_air}
 SELECT 
-  origin, month,
+  month,
+  name,
+  num_depart,
+  prop_late_over20,
+  avg_flight_dist
+FROM (SELECT 
+  carrier, 
+  month,
+  origin,
   COUNT(origin) AS num_depart,
   AVG(distance) AS avg_flight_dist,
   AVG(arr_delay > 20) AS prop_late_over20
-FROM (SELECT * FROM flights LIMIT 2000) `fl`
-GROUP BY carrier, month
+FROM (SELECT * FROM flights LIMIT 1000) fl
+GROUP BY origin, month) smry
+INNER JOIN airports AS a 
+  ON (smry.origin = a.faa)
 ```
+
+
 
   - With the dataset you wrote out, create a graph that helps illustrate the "worst" airports in terms of late arrivals. You have some freedom in how you define worst and you may want to consider some of the other variables you computed. Do some theming to make your graph look glamorous (those of you who weren't in my intro data science class this year may want to watch Will Chase's [Glamour of Graphics](https://www.youtube.com/watch?v=h5cTacaWE6I) talk for inspiration).
 ```{r, warning = FALSE}
@@ -393,28 +413,28 @@ each_airport <- each_airport %>%
 #5% or more arrivals are late: "bad"
 
 each_airport
-states <- map_data("state")
+states <- read_sf("ne_10m_admin_1_states_provinces/ne_10m_admin_1_states_provinces.shp")
 
-ggplot() + 
-  geom_polygon( data=states, aes(x=long, y=lat, group=group),
-                color="black", fill="white" ) +
-  geom_point(data = each_airport, aes(x=lon, y=lat, color = arrival_rank, size = num_depart)) +
-  ggtitle("Airports Ranked by Percentage of Late Arrivals") +
-  theme(axis.line=element_blank(),
-        axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        axis.title.x=element_blank(),
-        axis.title.y=element_blank(),
-        panel.background=element_rect(fill = "lightblue"),
-        panel.grid.major=element_blank(),
-        panel.grid.minor = element_blank(),
-        plot.background=element_blank(),
-        legend.title = element_blank()) +
-  scale_fill_discrete(name = "nothing",
-                      breaks=c("bad", "good","medium"),
-                      labels = c("0%", "less than 5%","5% or more"))
+states <- states %>%
+  filter(admin == "United States of America") %>%
+  st_transform(crs = 4326) %>%
+  st_crop(xmin = -125, xmax = -50, ymin = 24, ymax = 50)
+
   
+collect(each_airport) %>%
+  st_as_sf(coords = c("lon","lat"), crs = 4326) %>%
+  st_crop(xmin = -125, xmax = -50, ymin = 24, ymax = 50) %>%
+ggplot() + 
+  geom_sf(data=states,
+          color="azure4", fill="white") +
+  geom_sf(aes(color = arrival_rank, size = num_depart, alpha = 0.7)) +
+  ggtitle("Airports Ranked by Percentage of Late Arrivals") +
+  scale_color_discrete(breaks=c("bad", "good","medium"),
+                      labels = c("0%", "less than 5%","5% or more")) +
+  labs(size = "Number of Departures", color = "Percentage of Late Arrivals") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  coord_sf(crs = st_crs(5070))
 ```
   
   - Although your graph was truly inspirational, you've been requested to "boil it down to a few numbers." Some people just don't appreciate all that effort you put in. And, you need to use the already summarized data that you already pulled in from SQL. Create a table with 6 or fewer rows and 3 or fewer columns that summarizes which airport is the "worst" in terms of late arrivals. Be careful with your calculations. You may consider using the `kable`, `kableExtra`, or `gt` packages to make your table look truly spectacular.
@@ -427,14 +447,69 @@ each_airport_small <- each_airport %>%
 
 #because the airports with very high proportions of delayed departures only really had a handful of departures in a given month (the proportion late may be .33, but there were only three departures so that meant that only one was late), I chose to display the 6 busiest airports in the table (based on number of departures).
 each_airport_small
+
+kable(each_airport_small) %>%
+  kable_styling(latex_options = "striped") %>%
+  row_spec(3, color = 'white', background = 'red') %>% #the ultimate worst 
+row_spec(4, color = 'white', background = 'green') #the ultimate best
 ```
 
   
 2. Come up with your own interesting question that data in the airlines database can help you answer. Write a SQL query and equivalent R code chunk to extract the data you need and create an elegant graph to help answer the question. Be sure to write down the question so it is clear.
 
+**Question: From where do people most often travel to MSP?**
+
+R Chunk
 ```{r}
 dbListTables(con_air)
+
+to_msp <- tbl(con_air,"flights") %>%
+  head(100000) %>%
+  left_join(tbl(con_air,"airports"), by = c("origin" = "faa")) %>%
+  filter(dest == "MSP") %>%
+  group_by(city, lat, lon) %>%
+  summarize(count_city = n()) %>%
+  arrange(desc(count_city))
+
+to_msp
 ```
+
+SQL Chunk
+```{sql connection=con_air}
+SELECT
+  
+```
+
+
+
+```{r}
+ggplot() + 
+  geom_polygon( data=states, aes(x=long, y=lat, group=group),
+                color="black", fill="white" ) +
+  geom_point(data = to_msp, aes(x=lon, y=lat, color=count_city)) +
+  ggtitle("Number of Trips to MSP (Nov. 2010)") +
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        panel.background=element_rect(fill = "lightblue"),
+        panel.grid.major=element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background=element_blank()) +
+  labs(legend.title = "hi")
+
+collect(to_msp) %>%
+  st_as_sf(coords = c("lon","lat"), crs = 4326) %>%
+  st_crop(xmin = -125, xmax = -50, ymin = 24, ymax = 50) %>%
+ggplot() + 
+  geom_sf(data=states,
+          color="azure4", fill="white") +
+  geom_sf(aes(size = count_city, alpha = 0.7), color = "blue") +
+  ggtitle("Number of Trips to MSP (Nov. 2010)")
+```
+
 
 
 ## Function Friday
